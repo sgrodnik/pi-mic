@@ -1,18 +1,12 @@
 import WebSocket from "ws";
-import { concatPcm } from "../../core/audio/pcm.ts";
 import { joinParts } from "../../core/transcription/transcript.ts";
 import { DEEPGRAM_URL, type DeepgramOptions } from "./options.ts";
-import { transcribePrerecorded } from "./prerecorded.ts";
 import { deepgramQuery } from "./query.ts";
 
 const KEEP_ALIVE_MS = 8000;
-const FINALIZE_TIMEOUT_MS = 5000;
-const CLOSE_TIMEOUT_MS = 5000;
-
 interface ResultsMessage {
   type?: string;
   is_final?: boolean;
-  from_finalize?: boolean;
   channel?: { alternatives?: { transcript?: string }[] };
 }
 
@@ -27,27 +21,21 @@ class DeepgramStreamSession implements DeepgramStream {
   readonly #options: DeepgramOptions;
   readonly #socket: WebSocket;
   readonly #opened: Promise<void>;
-  readonly #closed: Promise<void>;
   readonly #keepAlive: NodeJS.Timeout;
   readonly #finals: string[] = [];
   readonly #unsent: Uint8Array[] = [];
-  readonly #recorded: Int16Array[] = [];
   #interim = "";
-  #failure: Error | null = null;
-  #onFinalized: (() => void) | null = null;
 
   constructor(options: DeepgramOptions) {
     this.#options = options;
     this.#socket = this.#connect();
     this.#opened = this.#watchOpening();
     this.#opened.catch((err) => options.onError?.(err));
-    this.#closed = new Promise((resolve) => this.#socket.on("close", () => resolve()));
     this.#socket.on("message", (data, isBinary) => this.#onMessage(data, isBinary));
     this.#keepAlive = setInterval(() => this.#sendKeepAlive(), KEEP_ALIVE_MS);
   }
 
   send(pcm: Int16Array): void {
-    this.#recorded.push(pcm.slice());
     const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength).slice();
     if (this.#socket.readyState === WebSocket.OPEN) this.#socket.send(bytes);
     else if (this.#socket.readyState === WebSocket.CONNECTING) this.#unsent.push(bytes);
@@ -58,15 +46,9 @@ class DeepgramStreamSession implements DeepgramStream {
   }
 
   async finish(): Promise<string> {
-    clearInterval(this.#keepAlive);
-    if (this.#failure) throw this.#failure;
-    await this.#opened;
-    await this.#finalize();
-    this.#socket.send(JSON.stringify({ type: "CloseStream" }));
-    await this.#awaitClose();
-    if (this.#interim) this.#finals.push(this.#interim);
-    const streamed = this.#streamedText();
-    return (await this.#secondPass()) || streamed;
+    const transcript = joinParts([...this.#finals, this.#interim]);
+    this.cancel();
+    return transcript;
   }
 
   cancel(): void {
@@ -95,11 +77,9 @@ class DeepgramStreamSession implements DeepgramStream {
         resolve();
       });
       this.#socket.on("unexpected-response", (_req, res) => {
-        this.#failure = new Error(`Deepgram HTTP ${res.statusCode}`);
-        reject(this.#failure);
+        reject(new Error(`Deepgram HTTP ${res.statusCode}`));
       });
       this.#socket.on("error", (err) => {
-        this.#failure = err;
         reject(err);
       });
     });
@@ -115,7 +95,6 @@ class DeepgramStreamSession implements DeepgramStream {
       this.#interim = "";
     } else this.#interim = transcript;
     this.#options.onUpdate(this.#streamedText(), this.#interim);
-    if (message.from_finalize) this.#onFinalized?.();
   }
 
   #sendKeepAlive(): void {
@@ -126,34 +105,6 @@ class DeepgramStreamSession implements DeepgramStream {
 
   #streamedText(): string {
     return joinParts(this.#finals);
-  }
-
-  #finalize(): Promise<void> {
-    return new Promise((resolve) => {
-      const timer = setTimeout(resolve, FINALIZE_TIMEOUT_MS);
-      this.#onFinalized = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      this.#socket.send(JSON.stringify({ type: "Finalize" }));
-    });
-  }
-
-  async #awaitClose(): Promise<void> {
-    const timer = setTimeout(() => this.#socket.terminate(), CLOSE_TIMEOUT_MS);
-    await this.#closed;
-    clearTimeout(timer);
-  }
-
-  async #secondPass(): Promise<string> {
-    try {
-      const full = await transcribePrerecorded(this.#options, concatPcm(this.#recorded));
-      if (full) this.#options.onUpdate(full, "");
-      return full;
-    } catch (err) {
-      this.#options.onError?.(err as Error);
-      return "";
-    }
   }
 }
 

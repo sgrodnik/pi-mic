@@ -4,7 +4,7 @@ import { appendText } from "../core/text/insertion.ts";
 import type { TranscriptionEngine } from "../core/transcription/engine.ts";
 import { combine } from "../core/transcription/transcript.ts";
 import { type Capture, startCapture } from "./capture/capture.ts";
-import { NOTIFY_PREFIX, STATUS_KEY, TAIL_MS } from "./constants.ts";
+import { NOTIFY_PREFIX, STATUS_KEY } from "./constants.ts";
 import { lockEditor } from "./editor-lock.ts";
 import { deviceIndex } from "./endpoint.ts";
 import { createEngine } from "./engine-factory.ts";
@@ -25,8 +25,6 @@ type State =
   | { kind: "starting" }
   | { kind: "recording"; rec: Recording }
   | { kind: "transcribing"; rec: Recording };
-
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class Dictation {
   readonly #agentDir: string;
@@ -76,7 +74,7 @@ export class Dictation {
   }
 
   #isLive(): boolean {
-    return this.#state.kind === "recording" || this.#state.kind === "transcribing";
+    return this.#state.kind === "recording";
   }
 
   async #start(ctx: ExtensionContext): Promise<void> {
@@ -130,8 +128,8 @@ export class Dictation {
 
   async #stop(ctx: ExtensionContext, rec: Recording): Promise<void> {
     this.#setState(ctx, { kind: "transcribing", rec });
+    rec.unlock();
     try {
-      await delay(TAIL_MS);
       await rec.capture.stop();
       const text = await rec.engine.stop();
       if (!text) {
@@ -140,16 +138,23 @@ export class Dictation {
           "warning",
         );
       }
-      this.#finish(ctx, rec, text);
+      this.#finish(ctx, rec, text, true);
     } catch (err) {
       ctx.ui.notify(`${NOTIFY_PREFIX}: ${(err as Error).message}`, "error");
-      this.#finish(ctx, rec, null);
+      this.#finish(ctx, rec, null, true);
     }
   }
 
-  #finish(ctx: ExtensionContext, rec: Recording, text: string | null): void {
+  #finish(
+    ctx: ExtensionContext,
+    rec: Recording,
+    text: string | null,
+    preserveEditor = false,
+  ): void {
     rec.unlock();
-    ctx.ui.setEditorText(text === null ? rec.base : appendText(rec.base, text));
+    if (!preserveEditor) {
+      ctx.ui.setEditorText(text === null ? rec.base : appendText(rec.base, text));
+    }
     this.#setState(ctx, { kind: "idle" });
   }
 }
