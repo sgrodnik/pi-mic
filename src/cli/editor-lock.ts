@@ -9,8 +9,18 @@ interface LockHandlers {
 
 export function lockEditor(ui: ExtensionContext["ui"], handlers: LockHandlers): () => void {
   return ui.onTerminalInput((data) => {
-    if (matchesKey(data, SHORTCUT)) handlers.onToggle();
-    else if (matchesKey(data, "escape")) handlers.onCancel();
+    if (matchesKey(data, SHORTCUT)) {
+      handlers.onToggle();
+      return { consume: true };
+    }
+    if (matchesKey(data, "escape")) {
+      handlers.onCancel();
+      return { consume: true };
+    }
+    if (matchesKey(data, "backspace") || matchesKey(data, "enter")) {
+      handlers.onToggle();
+      return { consume: false };
+    }
     return { consume: true };
   });
 }
